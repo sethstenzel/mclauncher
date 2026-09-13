@@ -22,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INIT = ROOT / "src" / "mclauncher" / "__init__.py"
 PYPROJECT = ROOT / "pyproject.toml"
+LOCKFILE = ROOT / "uv.lock"
 RELEASES = ROOT / "releases"
 
 VERSION_RE = re.compile(r'^(__version__\s*=\s*)"(\d+)\.(\d+)\.(\d+)"', re.M)
@@ -154,10 +155,20 @@ def main() -> None:
         print("[release] dry run: no files written, no build started", flush=True)
         return
 
+    lock_before = LOCKFILE.read_text(encoding="utf-8") if LOCKFILE.is_file() else None
     if new_str != old_str:
         INIT.write_text(set_init_version(init_before, new_str), encoding="utf-8")
         PYPROJECT.write_text(set_pyproject_version(pyproject_before, new_str), encoding="utf-8")
         print(f"[release] wrote {INIT.name} and {PYPROJECT.name}", flush=True)
+        # uv.lock records the project version too; refresh it so a release does
+        # not leave the repository dirty.
+        locked = subprocess.run(
+            ["uv", "lock", "--quiet"], cwd=ROOT, capture_output=True, text=True
+        )
+        if locked.returncode == 0:
+            print(f"[release] refreshed {LOCKFILE.name}", flush=True)
+        else:
+            print(f"[release] note: could not refresh {LOCKFILE.name} ({locked.stderr.strip()})", flush=True)
 
     cmd = [sys.executable, str(ROOT / "build.py")]
     for flag in ("standalone", "console", "clean", "clean_releases"):
@@ -169,6 +180,8 @@ def main() -> None:
     if result.returncode != 0:
         INIT.write_text(init_before, encoding="utf-8")
         PYPROJECT.write_text(pyproject_before, encoding="utf-8")
+        if lock_before is not None:
+            LOCKFILE.write_text(lock_before, encoding="utf-8")
         raise SystemExit(f"[release] build failed; version rolled back to {old_str}")
 
     if args.tag:
