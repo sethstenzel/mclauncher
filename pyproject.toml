@@ -1,0 +1,27 @@
+[project]
+name = "mclauncher"
+version = "1.1.3"
+description = "Offline-mode Minecraft launcher with a NiceGUI desktop UI"
+readme = "README.md"
+authors = [
+    { name = "Seth Stenzel", email = "seth.c.stenzel@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "nicegui>=3.16.0",
+    "pillow>=12.3.0",
+    "pystray>=0.19.5",
+    "pywebview>=6.2.1",
+]
+
+[project.scripts]
+mclauncher = "mclauncher:main"
+
+[build-system]
+requires = ["uv_build>=0.11.15,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "nuitka>=4.2.1",
+]
