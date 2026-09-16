@@ -1,10 +1,12 @@
 """Build a standalone MCLauncher executable with Nuitka.
 
-    uv run python build.py              # onefile exe -> releases/
-    uv run python build.py --standalone # folder build (faster, easier to debug)
-    uv run python build.py --clean      # wipe build caches first
+    uv run python tools/build.py              # onefile -> releases/
+    uv run python tools/build.py --standalone # folder build (easier to debug)
+    uv run python tools/build.py --clean      # wipe build caches first
 
-The finished binary is copied into ./releases.
+It builds for whatever machine it runs on, and the finished artifact is copied
+into ./releases. Normally you would not call this directly - the per-platform
+wrappers in packaging/ bump the version and check the result afterwards.
 """
 
 from __future__ import annotations
@@ -19,10 +21,11 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "src" / "mclauncher"
 ENTRY = PKG  # the package dir: Nuitka + `--python-flag=-m` runs its __main__
 ICON = PKG / "assets" / "icon.ico"
+ICON_PNG = PKG / "assets" / "icon.png"
 BUILD_DIR = ROOT / "build"
 RELEASES = ROOT / "releases"
 APP_NAME = "MCLauncher"
@@ -52,11 +55,9 @@ def nuitka_command(onefile: bool, jobs: int | None, console: bool = False) -> li
         "--include-package=nicegui",
         "--include-package-data=nicegui",
         "--include-package=uvicorn",
-        "--include-package=pystray",
         "--include-package=PIL",
-        "--include-data-files="
-        + str(ICON)
-        + "=mclauncher/assets/icon.ico",
+        "--include-data-files=" + str(ICON) + "=mclauncher/assets/icon.ico",
+        "--include-data-files=" + str(ICON_PNG) + "=mclauncher/assets/icon.png",
         "--nofollow-import-to=nuitka",
         "--nofollow-import-to=tkinter",
         f"--product-name={APP_NAME}",
@@ -65,6 +66,10 @@ def nuitka_command(onefile: bool, jobs: int | None, console: bool = False) -> li
         "--file-description=Offline-mode Minecraft launcher",
         "--copyright=Local build",
     ]
+    if not is_linux():
+        # The tray is a Windows/macOS affair. On Linux pystray would only find
+        # its X11 backend, which Wayland compositors have no tray for.
+        cmd.append("--include-package=pystray")
     if onefile:
         cmd.append("--onefile")
         # Without this the 40 MB payload is unpacked to a fresh temp folder on
@@ -79,11 +84,45 @@ def nuitka_command(onefile: bool, jobs: int | None, console: bool = False) -> li
             "--msvc=latest" if shutil.which("cl") else "--mingw64",
         ]
     elif is_mac():
+        # An .app bundle is what macOS expects to be handed; it is also
+        # mutually exclusive with --onefile, which main() accounts for.
         cmd += [f"--macos-app-icon={ICON}", "--macos-create-app-bundle"]
+    else:
+        # No --linux-icon: Nuitka only honours it for AppImage-style builds, and
+        # on Linux the icon comes from the .desktop entry install.sh writes.
+        # There is also no GTK/Qt webview to bundle - the UI opens in a Chromium
+        # app window instead (see mclauncher/desktop.py) - and following these
+        # imports would drag half the desktop into the binary.
+        cmd += [
+            "--nofollow-import-to=webview",
+            "--nofollow-import-to=gi",
+            "--nofollow-import-to=qtpy",
+        ]
     if jobs:
         cmd.append(f"--jobs={jobs}")
     cmd.append(str(ENTRY))
     return cmd
+
+
+def check_toolchain() -> None:
+    """Fail early and usefully instead of several minutes into a compile."""
+    if not is_linux():
+        return
+    # Nuitka shells out to patchelf to fix up RPATHs. It comes from the dev
+    # dependency group rather than the system, so make sure Nuitka can see it
+    # even when build.py was started without `uv run`.
+    if not shutil.which("patchelf"):
+        bundled = Path(sys.executable).parent / "patchelf"
+        if bundled.is_file():
+            os.environ["PATH"] = str(bundled.parent) + os.pathsep + os.environ.get("PATH", "")
+    missing = [tool for tool in ("patchelf", "gcc") if not shutil.which(tool)]
+    if missing:
+        raise SystemExit(
+            "missing build tools: " + ", ".join(missing) + "\n"
+            "patchelf ships in the dev dependency group - `uv sync` then build with\n"
+            "`./build_release.sh`. gcc has to come from the system; on Arch/Omarchy:\n"
+            "    sudo pacman -S --needed gcc"
+        )
 
 
 def process_alive(pid: int) -> bool:
@@ -140,8 +179,17 @@ def is_mac() -> bool:
     return sys.platform == "darwin"
 
 
+def is_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+
 def find_artifact(onefile: bool) -> Path:
+    """The thing Nuitka just built: one file, an .app bundle, or a dist folder."""
     exe = f"{APP_NAME}.exe" if is_windows() else APP_NAME
+    if is_mac():
+        bundle = next(BUILD_DIR.glob("*.app"), None)
+        if bundle is not None:
+            return bundle
     if onefile:
         candidate = BUILD_DIR / exe
         if candidate.is_file():
@@ -154,16 +202,28 @@ def find_artifact(onefile: bool) -> Path:
     raise SystemExit(f"could not find the build output under {BUILD_DIR}")
 
 
-def publish(artifact: Path, onefile: bool) -> Path:
+def publish(artifact: Path) -> Path:
+    """Copy the artifact into ./releases under a name that names the platform.
+
+    One artifact per os/arch, so builds of the same version for different
+    machines sit beside each other instead of overwriting one another.
+    """
     RELEASES.mkdir(parents=True, exist_ok=True)
     tag = f"{APP_NAME}-{version()}-{platform.system().lower()}-{platform.machine().lower()}"
     if artifact.is_file():
         target = RELEASES / (tag + artifact.suffix)
+        target.unlink(missing_ok=True)
         shutil.copy2(artifact, target)
+        return target
+    target = RELEASES / tag
+    shutil.rmtree(target, ignore_errors=True)
+    if artifact.suffix == ".app":
+        # A bundle has to keep its .app name to stay a bundle, so it goes
+        # inside the tagged folder rather than being renamed to it.
+        target.mkdir(parents=True)
+        shutil.copytree(artifact, target / artifact.name, symlinks=True)
     else:
-        target = RELEASES / tag
-        shutil.rmtree(target, ignore_errors=True)
-        shutil.copytree(artifact, target)
+        shutil.copytree(artifact, target, symlinks=True)
     return target
 
 
@@ -182,8 +242,9 @@ def main() -> None:
     parser.add_argument("--console", action="store_true", help="keep a console window (debugging)")
     args = parser.parse_args()
 
-    if not ICON.is_file():
+    if not ICON.is_file() or not ICON_PNG.is_file():
         raise SystemExit("missing icon: run `uv run --with pillow python tools/make_icon.py`")
+    check_toolchain()
     if args.clean:
         shutil.rmtree(BUILD_DIR, ignore_errors=True)
     if args.clean_releases:
@@ -191,6 +252,11 @@ def main() -> None:
 
     with build_lock():
         onefile = not args.standalone
+        if is_mac() and onefile:
+            # Nuitka refuses --onefile together with an app bundle, and a bare
+            # binary is not something macOS knows how to put in Launchpad.
+            print("macOS: building an .app bundle (--onefile does not apply)", flush=True)
+            onefile = False
         cmd = nuitka_command(onefile, args.jobs, args.console)
         print("$ " + " ".join(cmd), flush=True)
         started = time.time()
@@ -202,7 +268,7 @@ def main() -> None:
                 "rerun with --clean"
             )
 
-        target = publish(find_artifact(onefile), onefile)
+        target = publish(find_artifact(onefile))
 
     minutes = (time.time() - started) / 60
     size = (

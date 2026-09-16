@@ -8,11 +8,12 @@ import socket
 import subprocess
 import sys
 import threading
+import webbrowser
 from pathlib import Path
 
 from nicegui import app, ui
 
-from . import __version__, core
+from . import __version__, core, desktop
 from .tray import Tray
 
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.ico"
@@ -422,7 +423,13 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
                 elif kind == "versions":
                     apply_version_options()
                 elif kind == "running":
-                    status.text = "Minecraft is running - launcher hidden to the tray"
+                    # Only the native-window build has a tray to hide into; the
+                    # Linux one leaves this window up while you play.
+                    status.text = (
+                        "Minecraft is running - launcher hidden to the tray"
+                        if window() is not None
+                        else "Minecraft is running - close this window when you are done"
+                    )
                     progress.value = 1
                     stop.set_visibility(True)
                 elif kind == "finished":
@@ -469,22 +476,68 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def run(native: bool = True, port: int | None = None, reload: bool = False) -> None:
-    if port is None:
-        port = free_port()
-    app.native.window_args["resizable"] = False
-    app.native.window_args["min_size"] = WINDOW_SIZE
-    ui.run(
-        native=native,
-        reload=reload,
-        port=port,
+def serve(**overrides) -> None:
+    """ui.run with the settings every mode shares.
+
+    `window_size` is deliberately not in here: NiceGUI turns native mode on as
+    soon as it is passed, which is exactly wrong for the two browser modes.
+    """
+    options = dict(
+        reload=False,
         title="MCLauncher",
         favicon=str(ICON_PATH) if ICON_PATH.is_file() else "🎮",
         dark=True,
-        window_size=WINDOW_SIZE,
-        show=not native,
         storage_secret="mclauncher-local",
     )
+    options.update(overrides)
+    ui.run(**options)
+
+
+def run_in_app_window(port: int, reload: bool) -> None:
+    """Serve locally and show the page in a Chromium app window (Linux)."""
+    url = f"http://127.0.0.1:{port}"
+    browser: dict[str, subprocess.Popen | None] = {"proc": None}
+
+    def wait_for_close(proc: subprocess.Popen) -> None:
+        proc.wait()
+        app.shutdown()  # the window is gone, so there is nothing left to serve
+
+    def open_window() -> None:
+        proc = desktop.open_app_window(
+            url, WINDOW_SIZE, core.launcher_data_dir() / "window", port
+        )
+        browser["proc"] = proc
+        if proc is None:
+            # No Chromium fork installed: hand the URL to whatever does handle
+            # http, and leave the server up because there is no window to watch.
+            print(f"no app-window browser found; opening {url} in your browser", flush=True)
+            webbrowser.open(url)
+            return
+        threading.Thread(target=wait_for_close, args=(proc,), daemon=True).start()
+
+    def close_window() -> None:
+        proc = browser["proc"]
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+
+    app.on_startup(open_window)
+    app.on_shutdown(close_window)
+    # 127.0.0.1, not NiceGUI's 0.0.0.0 default: this is a local launcher, not
+    # something the rest of the network should be able to drive.
+    serve(native=False, show=False, host="127.0.0.1", port=port, reload=reload)
+
+
+def run(native: bool = True, port: int | None = None, reload: bool = False) -> None:
+    if port is None:
+        port = free_port()
+    if native and desktop.native_webview_available():
+        app.native.window_args["resizable"] = False
+        app.native.window_args["min_size"] = WINDOW_SIZE
+        serve(native=True, show=False, port=port, reload=reload, window_size=WINDOW_SIZE)
+    elif native:
+        run_in_app_window(port, reload)
+    else:
+        serve(native=False, show=True, host="127.0.0.1", port=port, reload=reload)
 
 
 def main() -> None:
@@ -492,7 +545,13 @@ def main() -> None:
 
     Without `--port` each instance takes a free port of its own, so any number of
     launchers can run side by side.
+
+    `--wm-class` prints the window class and exits - what install.sh writes into
+    the .desktop file, and what a Hyprland window rule has to match.
     """
+    if "--wm-class" in sys.argv:
+        print(desktop.app_window_wm_class())
+        return
     native = "--web" not in sys.argv
     port = None
     if "--port" in sys.argv:

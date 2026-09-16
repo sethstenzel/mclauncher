@@ -769,7 +769,39 @@ def _java_candidates() -> list[Path]:
             official = root / "Minecraft Launcher" / "runtime"
             if official.is_dir():
                 found.extend(official.glob(f"*/*/*/bin/{exe}"))
-    return [p for p in found if p.is_file()]
+    elif os_name() == "osx":
+        for base in (Path("/Library/Java/JavaVirtualMachines"), Path("/opt/homebrew/opt")):
+            if base.is_dir():
+                found.extend(base.glob(f"*/Contents/Home/bin/{exe}"))
+                found.extend(base.glob(f"*/bin/{exe}"))
+    else:
+        # /usr/lib/jvm is where every distribution puts its packaged JDKs;
+        # Arch also keeps `default-runtime` and `java-N-openjdk` symlinks there.
+        for base in (
+            Path("/usr/lib/jvm"),
+            Path("/usr/lib64/jvm"),
+            Path("/opt"),
+            Path.home() / ".sdkman" / "candidates" / "java",
+            Path.home() / ".jdks",  # IntelliJ
+        ):
+            if base.is_dir():
+                found.extend(base.glob(f"*/bin/{exe}"))
+                found.extend(base.glob(f"*/jre/bin/{exe}"))
+    # A JDK reached by two different symlinks is still one JDK; probing it twice
+    # costs a subprocess launch each time.
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in found:
+        if not candidate.is_file():
+            continue
+        try:
+            key = candidate.resolve()
+        except OSError:
+            key = candidate
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
 
 
 def find_system_java(want_major: int) -> Path | None:
@@ -814,10 +846,19 @@ def launch(
     cmd = build_command(plan, server, fullscreen)
     log(f"launching {plan.version_id} with {plan.java.name}")
     plan.game_dir.mkdir(parents=True, exist_ok=True)
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    if not capture_output:
-        # own process group: the game outlives the launcher cleanly
-        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    extra: dict = {}
+    if os_name() == "windows":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if not capture_output:
+            # own process group: the game outlives the launcher cleanly
+            flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        extra["creationflags"] = flags
+    else:
+        # The POSIX equivalent, and unconditional here: CREATE_NEW_PROCESS_GROUP
+        # is 0 on Linux, so the old code detached nothing. It matters more here
+        # too - there is no tray to hide in, so the launcher window stays
+        # closable while the game runs, and closing it must not end the game.
+        extra["start_new_session"] = True
     return subprocess.Popen(
         cmd,
         cwd=str(plan.game_dir),
@@ -828,7 +869,7 @@ def launch(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        creationflags=flags,
+        **extra,
     )
 
 

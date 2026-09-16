@@ -1,5 +1,9 @@
 """Bump the version, then build the release executable.
 
+Platform-neutral. Normally invoked by the wrapper for your platform
+(`packaging/<os>/build-release.*`), which checks the toolchain first, but it
+runs standalone too:
+
     uv run python tools/release.py            # patch: 1.0.0 -> 1.0.1
     uv run python tools/release.py minor      # minor: 1.0.3 -> 1.1.0
     uv run python tools/release.py major      # major: 1.4.2 -> 2.0.0
@@ -170,7 +174,7 @@ def main() -> None:
         else:
             print(f"[release] note: could not refresh {LOCKFILE.name} ({locked.stderr.strip()})", flush=True)
 
-    cmd = [sys.executable, str(ROOT / "build.py")]
+    cmd = [sys.executable, str(ROOT / "tools" / "build.py")]
     for flag in ("standalone", "console", "clean", "clean_releases"):
         if getattr(args, flag):
             cmd.append("--" + flag.replace("_", "-"))
@@ -201,7 +205,8 @@ def main() -> None:
             if item.is_file()
             else sum(p.stat().st_size for p in item.rglob("*") if p.is_file())
         )
-        exe = item if item.is_file() else item / "MCLauncher.exe"
+        binary = "MCLauncher.exe" if sys.platform.startswith("win") else "MCLauncher"
+        exe = item if item.is_file() else item / binary
         stamped = embedded_version(exe) if exe.is_file() else None
         detail = f"file version {stamped}" if stamped else "no version resource"
         print(f"    {item.name}  ({size / 1e6:.0f} MB, {detail})")

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=MCLauncher
+GenericName=Minecraft Launcher
+Comment=Offline-mode Minecraft launcher for your home server
+Exec=@EXEC@
+Icon=@ICON_NAME@
+Terminal=false
+Categories=Game;
+Keywords=minecraft;game;launcher;
+# As reported by `mclauncher --wm-class`. The compositor uses it to tie the
+# window to this entry; it is also what a Hyprland windowrule has to match.
+StartupWMClass=@WM_CLASS@
+StartupNotify=true

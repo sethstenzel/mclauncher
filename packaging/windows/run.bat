@@ -1,6 +1,11 @@
 @echo off
+REM Run MCLauncher from source, for development.
+REM
+REM   packaging\windows\run.bat            open the launcher window
+REM   packaging\windows\run.bat --web      open it in your normal browser instead
+REM   packaging\windows\run.bat --port N   pin the server port
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0..\.."
 
 where uv >nul 2>nul
 if errorlevel 1 (

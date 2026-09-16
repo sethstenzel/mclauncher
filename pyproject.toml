@@ -10,8 +10,13 @@ requires-python = ">=3.12"
 dependencies = [
     "nicegui>=3.16.0",
     "pillow>=12.3.0",
-    "pystray>=0.19.5",
-    "pywebview>=6.2.1",
+    # Tray icon and native webview are a Windows/macOS story. On Linux pystray
+    # only finds its X11 backend (no Wayland compositor offers an XEmbed tray)
+    # and pywebview needs system GTK+WebKit that cannot be frozen into a
+    # portable binary, so the Linux build opens a Chromium app window instead
+    # - see src/mclauncher/desktop.py.
+    "pystray>=0.19.5; sys_platform != 'linux'",
+    "pywebview>=6.2.1; sys_platform != 'linux'",
 ]
 
 [project.scripts]
@@ -24,4 +29,5 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "nuitka>=4.2.1",
+    "patchelf>=0.17.2.4 ; sys_platform == 'linux'",
 ]

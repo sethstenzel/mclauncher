@@ -13,7 +13,11 @@ from pathlib import Path
 
 from PIL import Image
 
-OUT = Path(__file__).resolve().parent.parent / "src" / "mclauncher" / "assets" / "icon.ico"
+ASSETS = Path(__file__).resolve().parent.parent / "src" / "mclauncher" / "assets"
+OUT = ASSETS / "icon.ico"
+# Linux wants a PNG: it is the icon install.sh puts in the hicolor theme for
+# the .desktop entry to reference.
+OUT_PNG = ASSETS / "icon.png"
 
 GRASS = [(0x5B, 0x9B, 0x36), (0x6A, 0xB0, 0x3E), (0x54, 0x8E, 0x30), (0x7A, 0xC0, 0x4A)]
 DIRT = [(0x86, 0x60, 0x43), (0x76, 0x54, 0x3A), (0x95, 0x6B, 0x4B), (0x6B, 0x4C, 0x34)]
@@ -43,11 +47,13 @@ def build_tile(size: int = 16) -> Image.Image:
 
 def main() -> None:
     tile = build_tile()
-    OUT.parent.mkdir(parents=True, exist_ok=True)
+    ASSETS.mkdir(parents=True, exist_ok=True)
     sizes = [16, 24, 32, 48, 64, 128, 256]
     frames = [tile.resize((s, s), Image.NEAREST) for s in sizes]
     frames[-1].save(OUT, format="ICO", sizes=[(s, s) for s in sizes])
-    print(f"wrote {OUT} ({OUT.stat().st_size} bytes)")
+    frames[-1].save(OUT_PNG, format="PNG")
+    for path in (OUT, OUT_PNG):
+        print(f"wrote {path} ({path.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":
