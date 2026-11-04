@@ -58,6 +58,7 @@ class LauncherState:
 
     def __init__(self) -> None:
         self.settings = core.Settings.load()
+        self.passwords = core.PasswordStore()
         self.versions: list[core.VersionEntry] = []
         self.events: queue.Queue[tuple] = queue.Queue()
         self.busy = False
@@ -87,6 +88,7 @@ def version_options(state: LauncherState) -> list[str]:
 def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
     state = LauncherState()
     settings = state.settings
+    passwords = state.passwords
     max_ram = total_ram_mb()
 
     ui.query("body").style(f"background: {DARK}")
@@ -125,8 +127,21 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
                            'hint="pick a saved name or type a new one"')
                     .classes("flex-1")
                 )
+                lock_btn = ui.button(icon="lock_open").props("flat dense round color=grey-5")
+                with lock_btn:
+                    lock_tip = ui.tooltip("Set a launcher password for this player")
                 forget_btn = ui.button(icon="person_remove").props("flat dense round color=grey-5")
                 forget_btn.tooltip("Forget the selected player name")
+            password_row = ui.row().classes("w-full items-center gap-2 no-wrap")
+            with password_row:
+                password = (
+                    ui.input("Launcher password", password=True, password_toggle_button=True)
+                    .props('outlined dark dense hint="this player is locked in this launcher"')
+                    .classes("flex-1")
+                )
+                remember_pw = ui.checkbox("Remember").props("dense dark color=green")
+                remember_pw.tooltip("Don't ask for this player's password again on this computer")
+            password_row.set_visibility(False)
             with ui.row().classes("w-full items-center gap-2 no-wrap"):
                 version = (
                     ui.select([], label="Version to play", with_input=True)
@@ -146,6 +161,10 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
                 snapshots.props("dense dark")
                 snapshots.tooltip("Also list snapshots, betas and alphas")
             uuid_label = ui.label().classes("text-xs text-gray-500")
+
+        # -- password dialog ---------------------------------------------- #
+        with ui.dialog() as pw_dialog, ui.card().classes("w-[420px]").style(f"background:{PANEL}"):
+            pw_body = ui.column().classes("w-full gap-3")
 
         # -- options ------------------------------------------------------ #
         with ui.expansion("Options", icon="tune").classes("w-full").style(
@@ -180,11 +199,12 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
                     .classes("w-full")
                 )
                 ram_label = ui.label().classes("text-sm text-gray-300")
+                ram_max = max(2048, min(max_ram, 32768))
                 ram = ui.slider(
                     min=1024,
-                    max=max(2048, min(max_ram, 32768)),
+                    max=ram_max,
                     step=512,
-                    value=min(settings.ram_mb, max_ram),
+                    value=max(1024, min(int(settings.ram_mb or 4096), ram_max)),
                 ).props("label-always color=green")
                 ram_label.bind_text_from(ram, "value", lambda v: f"Memory: {int(v)} MB")
 
@@ -224,6 +244,8 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
             # blur handler below would write the old name back over the selection.
             value = getattr(event, "value", None)
             typed["text"] = value.strip() if isinstance(value, str) else ""
+            password.value = ""  # never carry one player's password over to another
+            remember_pw.value = False
             refresh_uuid()
 
         def commit_typed() -> None:
@@ -244,6 +266,110 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
                 uuid_label.text = f"offline UUID: {core.offline_uuid(name)}"
             else:
                 uuid_label.text = "username: 3-16 chars, letters/numbers/underscore"
+            refresh_lock()
+
+        def refresh_lock() -> None:
+            """Show the password box only for a locked name that isn't remembered."""
+            name = (username.value or "").strip()
+            locked = bool(name) and passwords.has_password(name)
+            lock_btn.props(f"icon={'lock' if locked else 'lock_open'}")
+            lock_btn.props(f"color={'green' if locked else 'grey-5'}")
+            lock_tip.text = (
+                "Change or remove this player's launcher password"
+                if locked
+                else "Set a launcher password for this player"
+            )
+            need = locked and passwords.needs_password(name)
+            if need != password_row.visible:
+                password.value = ""
+                remember_pw.value = False
+            password_row.set_visibility(need)
+
+        def open_password_dialog() -> None:
+            commit_typed()
+            name = (username.value or "").strip()
+            problem = core.validate_username(name)
+            if problem:
+                ui.notify(f"Pick or type a valid player name first ({problem})", color="negative")
+                return
+            locked = passwords.has_password(name)
+            pw_body.clear()
+            with pw_body:
+                title = "Change password for" if locked else "Set a password for"
+                ui.label(f"{title} {name}").classes("text-lg text-white")
+                ui.label(
+                    "Only this launcher asks for it. Servers in offline mode still let "
+                    "anyone join with this name from any other launcher."
+                ).classes("text-xs text-gray-400")
+                current = None
+                if locked:
+                    current = (
+                        ui.input("Current password", password=True, password_toggle_button=True)
+                        .props("outlined dark dense autofocus")
+                        .classes("w-full")
+                    )
+                new_label = "New password (blank = keep current)" if locked else "New password"
+                new_pw = (
+                    ui.input(new_label, password=True, password_toggle_button=True)
+                    .props("outlined dark dense" + ("" if locked else " autofocus"))
+                    .classes("w-full")
+                )
+                confirm = (
+                    ui.input("Confirm new password", password=True, password_toggle_button=True)
+                    .props("outlined dark dense")
+                    .classes("w-full")
+                )
+                remember = ui.checkbox(
+                    "Remember on this computer (don't ask when picked from the list)",
+                    value=passwords.is_remembered(name) if locked else False,
+                ).props("dense dark color=green")
+
+                def check_current() -> bool:
+                    if current is not None and not passwords.verify(name, current.value or ""):
+                        ui.notify("Current password is wrong", color="negative")
+                        return False
+                    return True
+
+                def save() -> None:
+                    if not check_current():
+                        return
+                    new = new_pw.value or ""
+                    if new != (confirm.value or ""):
+                        ui.notify("The new passwords don't match", color="negative")
+                        return
+                    if new:
+                        passwords.set_password(name, new, remember=bool(remember.value))
+                        ui.notify(f"Password set for {name}", color="positive")
+                    elif locked:
+                        passwords.set_remembered(name, bool(remember.value))
+                        ui.notify(f"Saved settings for {name}", color="positive")
+                    else:
+                        ui.notify("Enter a password", color="negative")
+                        return
+                    if name not in username.options:
+                        username.options = list(username.options) + [name]
+                        username.update()
+                    pw_dialog.close()
+                    refresh_lock()
+
+                def remove() -> None:
+                    if not check_current():
+                        return
+                    passwords.clear_password(name)
+                    ui.notify(f"Removed the password for {name}", color="warning")
+                    pw_dialog.close()
+                    refresh_lock()
+
+                for box in (current, new_pw, confirm):
+                    if box is not None:
+                        box.on("keydown.enter", save)
+                with ui.row().classes("w-full items-center gap-2"):
+                    if locked:
+                        ui.button("Remove password", on_click=remove).props("flat color=red-5")
+                    ui.space()
+                    ui.button("Cancel", on_click=pw_dialog.close).props("flat color=grey-5")
+                    ui.button("Save", on_click=save).props("unelevated color=green")
+            pw_dialog.open()
 
         def apply_version_options(keep: str = "") -> None:
             options = version_options(state)
@@ -258,6 +384,7 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
                 return
             settings.forget_username(name)
             settings.save()
+            passwords.set_remembered(name, False)  # the lock itself stays on the name
             username.options = list(settings.usernames)
             username.value = settings.username or None
             username.update()
@@ -378,12 +505,27 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
                 state.finished(False, str(exc))
 
         def on_play() -> None:
+            if state.busy:
+                return
             commit_typed()  # a name typed but never confirmed still counts
-            cfg = collect_settings()
-            problem = core.validate_username(cfg.username)
+            name = (username.value or "").strip()
+            # Check before collect_settings(), so a bad name or a wrong password
+            # never ends up saved in the player list.
+            problem = core.validate_username(name)
             if problem:
                 ui.notify(f"Username: {problem}", color="negative")
                 return
+            if passwords.needs_password(name):
+                if not passwords.verify(name, password.value or ""):
+                    password.value = ""
+                    password_row.set_visibility(True)
+                    ui.notify(f"Wrong launcher password for {name}", color="negative")
+                    return
+                if remember_pw.value:
+                    passwords.set_remembered(name, True)
+                password.value = ""
+                refresh_lock()
+            cfg = collect_settings()
             if not cfg.version:
                 ui.notify("Pick a version first", color="negative")
                 return
@@ -443,6 +585,8 @@ def main_page() -> None:  # noqa: C901 - one screen, kept together on purpose
         username.on("input-value", remember_typed)
         username.on("blur", lambda _: commit_typed())
         forget_btn.on_click(forget_player)
+        lock_btn.on_click(open_password_dialog)
+        password.on("keydown.enter", on_play)
         snapshots.on_value_change(lambda _: apply_version_options())
         refresh_btn.on_click(on_refresh)
         play.on_click(on_play)
@@ -477,6 +621,9 @@ def run(native: bool = True, port: int | None = None, reload: bool = False) -> N
     ui.run(
         native=native,
         reload=reload,
+        # Loopback only: NiceGUI's default for browser mode is 0.0.0.0, which
+        # would let anyone on the network drive the launcher.
+        host="127.0.0.1",
         port=port,
         title="MCLauncher",
         favicon=str(ICON_PATH) if ICON_PATH.is_file() else "🎮",

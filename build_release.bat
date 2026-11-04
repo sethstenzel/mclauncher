@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-REM Build a release exe into .eleases and bump the version number.
+REM Build a release exe into releases and bump the version number.
 REM   build_release.bat              patch bump  (1.0.0 -> 1.0.1)
 REM   build_release.bat minor        minor bump  (1.0.3 -> 1.1.0)
 REM   build_release.bat major        major bump  (1.4.2 -> 2.0.0)

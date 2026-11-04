@@ -2,7 +2,7 @@
 
 import sys
 
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 
 
 def ensure_streams() -> None:
@@ -44,6 +44,8 @@ def main() -> None:
         from .ui import main as run_ui
 
         run_ui()
+    except (SystemExit, KeyboardInterrupt):
+        raise  # a normal exit or Ctrl+C, not a crash
     except BaseException:
         import datetime
         import traceback

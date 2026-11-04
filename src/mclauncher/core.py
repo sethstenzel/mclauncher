@@ -8,6 +8,7 @@ server running with online-mode=false sees a stable identity per name.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import platform
@@ -139,6 +140,17 @@ def http_json(url: str) -> dict:
     return json.loads(http_bytes(url).decode("utf-8"))
 
 
+def write_atomic(target: Path, data: bytes) -> None:
+    """Replace a file in one step, so another launcher never reads half of it."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 @dataclass
 class DownloadItem:
     url: str
@@ -207,9 +219,9 @@ def fetch_versions(max_age: float = 900) -> list[VersionEntry]:
         if versions:
             return versions
         raise
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(raw)
-    return _parse_manifest(json.loads(raw.decode("utf-8")))
+    versions = _parse_manifest(json.loads(raw.decode("utf-8")))
+    write_atomic(cache, raw)
+    return versions
 
 
 def rules_allow(rules: list | None, features: dict | None = None) -> bool:
@@ -263,6 +275,8 @@ class LaunchPlan:
     jvm_args: list[str]
     game_args: list[str]
     game_dir: Path
+    # 1.20+ ignores --server/--port; it joins via --quickPlayMultiplayer instead
+    quick_play: bool = False
 
 
 class Installer:
@@ -360,8 +374,9 @@ class Installer:
             if entry is None:
                 raise RuntimeError(f"unknown version: {version_id}")
             self.log(f"fetching metadata for {version_id}")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(http_bytes(entry.url))
+            raw = http_bytes(entry.url)
+            json.loads(raw.decode("utf-8"))  # never cache a broken file
+            write_atomic(path, raw)
         data = json.loads(path.read_text(encoding="utf-8"))
         parent_id = data.get("inheritsFrom")
         if parent_id:  # modded profiles (Fabric/Forge) chain onto a vanilla version
@@ -648,6 +663,7 @@ class Installer:
             jvm_args=prefix + jvm_args,
             game_args=game_args,
             game_dir=self.game_dir,
+            quick_play=supports_quick_play(version),
         )
 
 
@@ -664,6 +680,10 @@ def merge_versions(parent: dict, child: dict) -> dict:
     if "minecraftArguments" in child:
         merged["minecraftArguments"] = child["minecraftArguments"]
     return merged
+
+
+def supports_quick_play(version: dict) -> bool:
+    return "quickPlayMultiplayer" in json.dumps((version.get("arguments") or {}).get("game", []))
 
 
 def _flatten_arg(arg, features: dict) -> list[str]:
@@ -789,8 +809,12 @@ def find_system_java(want_major: int) -> Path | None:
 def build_command(plan: LaunchPlan, server: str = "", fullscreen: bool = False) -> list[str]:
     cmd = [str(plan.java), *plan.jvm_args, plan.main_class, *plan.game_args]
     if server:
-        host, _, port = server.partition(":")
-        cmd += ["--server", host, "--port", port or "25565"]
+        host, _, port = server.strip().rpartition(":") if ":" in server else (server.strip(), "", "")
+        port = port or "25565"
+        if plan.quick_play:
+            cmd += ["--quickPlayMultiplayer", f"{host}:{port}"]
+        else:
+            cmd += ["--server", host, "--port", port]
     if fullscreen and "--fullscreen" not in cmd:
         cmd.append("--fullscreen")
     return cmd
@@ -859,8 +883,8 @@ class Settings:
         self.username = name
 
     def forget_username(self, name: str) -> None:
-        self.usernames = [u for u in self.usernames if u != name]
-        if self.username == name:
+        self.usernames = [u for u in self.usernames if u.lower() != name.lower()]
+        if self.username.lower() == name.lower():
             self.username = self.usernames[0] if self.usernames else ""
 
     @classmethod
@@ -878,11 +902,93 @@ class Settings:
 
     def save(self) -> None:
         """Write atomically: another launcher may be saving at the same moment."""
-        target = self.path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        write_atomic(self.path(), json.dumps(asdict(self), indent=2).encode("utf-8"))
+
+
+# --------------------------------------------------------------------------- #
+# launcher passwords
+# --------------------------------------------------------------------------- #
+class PasswordStore:
+    """Optional per-name passwords, local to this launcher only.
+
+    This is a convenience lock, not security: Minecraft servers in offline mode
+    accept any name from any launcher, and anyone with access to this computer
+    can edit or delete the file. It just stops people sharing this launcher from
+    casually playing as each other.
+
+    Kept in its own file (not settings.json) and re-read on every call, so one
+    launcher window saving its settings can never wipe a password another
+    window just set. Names are matched case-insensitively, the same way servers
+    treat player names. Only a salted PBKDF2 hash is stored; "remember" just
+    skips the prompt, so no password is ever written down in plain text.
+    """
+
+    ITERATIONS = 200_000
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or (launcher_data_dir() / "passwords.json")
+
+    @staticmethod
+    def _key(name: str) -> str:
+        return (name or "").strip().lower()
+
+    def _load(self) -> dict[str, dict]:
         try:
-            tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
-            tmp.replace(target)
-        finally:
-            tmp.unlink(missing_ok=True)
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save(self, data: dict[str, dict]) -> None:
+        write_atomic(self.path, json.dumps(data, indent=2).encode("utf-8"))
+
+    @classmethod
+    def _hash(cls, password: str, salt: bytes, iterations: int) -> str:
+        return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations).hex()
+
+    def has_password(self, name: str) -> bool:
+        return self._key(name) in self._load()
+
+    def is_remembered(self, name: str) -> bool:
+        return bool(self._load().get(self._key(name), {}).get("remember"))
+
+    def needs_password(self, name: str) -> bool:
+        entry = self._load().get(self._key(name))
+        return entry is not None and not entry.get("remember")
+
+    def verify(self, name: str, password: str) -> bool:
+        entry = self._load().get(self._key(name))
+        if entry is None:
+            return True
+        try:
+            salt = bytes.fromhex(entry["salt"])
+            want = entry["hash"]
+            iterations = int(entry.get("iterations", self.ITERATIONS))
+        except (KeyError, ValueError, TypeError):
+            return False
+        return hmac.compare_digest(self._hash(password or "", salt, iterations), want)
+
+    def set_password(self, name: str, password: str, remember: bool = False) -> None:
+        if not password:
+            raise ValueError("password cannot be empty")
+        salt = os.urandom(16)
+        data = self._load()
+        data[self._key(name)] = {
+            "salt": salt.hex(),
+            "hash": self._hash(password, salt, self.ITERATIONS),
+            "iterations": self.ITERATIONS,
+            "remember": bool(remember),
+        }
+        self._save(data)
+
+    def set_remembered(self, name: str, remember: bool) -> None:
+        data = self._load()
+        entry = data.get(self._key(name))
+        if entry is not None and bool(entry.get("remember")) != bool(remember):
+            entry["remember"] = bool(remember)
+            self._save(data)
+
+    def clear_password(self, name: str) -> None:
+        data = self._load()
+        if data.pop(self._key(name), None) is not None:
+            self._save(data)
