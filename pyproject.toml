@@ -2,6 +2,8 @@
 name = "mclauncher"
 version = "1.2.0"
 description = "Offline-mode Minecraft launcher with a NiceGUI desktop UI"
+license = "MIT"
+license-files = ["LICENSE"]
 readme = "README.md"
 authors = [
     { name = "Seth Stenzel", email = "seth.c.stenzel@gmail.com" }

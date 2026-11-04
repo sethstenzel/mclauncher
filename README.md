@@ -164,3 +164,7 @@ uv run python build.py --console        # keep a console window, for debugging s
 Nuitka compiles it; the first build takes a while and may download a C
 compiler. Only one build can run at a time. The result needs no Python or uv on
 the machine that runs it.
+
+## License
+
+[MIT](LICENSE). Minecraft is a trademark of Mojang/Microsoft; this project is not affiliated with them.
